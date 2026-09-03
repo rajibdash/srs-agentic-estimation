@@ -6,7 +6,36 @@ Transforms complex-valued IQ samples (I + jQ) into 2-channel tensors
 """
 
 import numpy as np
-from typing import Tuple
+from typing import Tuple, Optional
+from functools import lru_cache
+
+
+# Pre-computed windows cache
+_WINDOW_CACHE = {}
+
+
+def _get_cached_window(window_type: str, length: int) -> np.ndarray:
+    """
+    Get or create a pre-computed window function.
+    
+    Args:
+        window_type: 'hann', 'hamming', 'blackman'
+        length: Window length
+        
+    Returns:
+        Cached window array
+    """
+    key = (window_type, length)
+    if key not in _WINDOW_CACHE:
+        if window_type == 'hann':
+            _WINDOW_CACHE[key] = np.hanning(length)
+        elif window_type == 'hamming':
+            _WINDOW_CACHE[key] = np.hamming(length)
+        elif window_type == 'blackman':
+            _WINDOW_CACHE[key] = np.blackman(length)
+        else:
+            _WINDOW_CACHE[key] = np.ones(length)
+    return _WINDOW_CACHE[key]
 
 
 def parse_complex_iq_to_tensor(iq_samples: np.ndarray) -> np.ndarray:
@@ -41,6 +70,54 @@ def tensor_to_complex_iq(tensor: np.ndarray) -> np.ndarray:
     return real_part + 1j * imag_part
 
 
+class IncrementalStatistics:
+    """
+    Efficient incremental statistics computation using Welford's algorithm.
+    Avoids recomputing mean/std from scratch on every call.
+    """
+    
+    def __init__(self, max_samples: int = 10000):
+        """
+        Initialize incremental statistics tracker.
+        
+        Args:
+            max_samples: Maximum samples to track before rotation
+        """
+        self.max_samples = max_samples
+        self.count = 0
+        self.mean = 0.0
+        self.M2 = 0.0  # Welford's M2 for variance
+    
+    def update(self, value: float) -> None:
+        """
+        Update statistics with new value using Welford's algorithm.
+        
+        Args:
+            value: New data point
+        """
+        self.count += 1
+        delta = value - self.mean
+        self.mean += delta / self.count
+        delta2 = value - self.mean
+        self.M2 += delta * delta2
+    
+    def get_mean(self) -> float:
+        """Get current mean."""
+        return self.mean
+    
+    def get_std(self) -> float:
+        """Get current standard deviation."""
+        if self.count < 2:
+            return 0.0
+        return np.sqrt(self.M2 / (self.count - 1))
+    
+    def reset(self) -> None:
+        """Reset statistics."""
+        self.count = 0
+        self.mean = 0.0
+        self.M2 = 0.0
+
+
 def normalize_iq_tensor(tensor: np.ndarray, mean: float = 0.0, std: float = 1.0) -> np.ndarray:
     """
     Normalize IQ tensor to zero mean and unit variance.
@@ -65,7 +142,7 @@ def normalize_iq_tensor(tensor: np.ndarray, mean: float = 0.0, std: float = 1.0)
 
 def compute_power(iq_tensor: np.ndarray) -> np.ndarray:
     """
-    Compute instantaneous power from IQ tensor.
+    Compute instantaneous power from IQ tensor using vectorized operations.
     
     Power = Real^2 + Imaginary^2
     
@@ -83,6 +160,7 @@ def compute_power(iq_tensor: np.ndarray) -> np.ndarray:
 def apply_windowing(srs_grid: np.ndarray, window_type: str = 'hann') -> np.ndarray:
     """
     Apply windowing function to SRS grid to reduce spectral leakage.
+    Uses cached window functions to avoid recomputation.
     
     Args:
         srs_grid: Input SRS grid
@@ -91,13 +169,13 @@ def apply_windowing(srs_grid: np.ndarray, window_type: str = 'hann') -> np.ndarr
     Returns:
         Windowed SRS grid
     """
-    if window_type == 'hann':
-        window = np.hanning(srs_grid.shape[-1])
-    elif window_type == 'hamming':
-        window = np.hamming(srs_grid.shape[-1])
-    elif window_type == 'blackman':
-        window = np.blackman(srs_grid.shape[-1])
-    else:
-        window = np.ones(srs_grid.shape[-1])
-    
+    window = _get_cached_window(window_type, srs_grid.shape[-1])
     return srs_grid * window
+
+
+def clear_window_cache() -> None:
+    """
+    Clear the window function cache (useful for testing/memory management).
+    """
+    global _WINDOW_CACHE
+    _WINDOW_CACHE.clear()
