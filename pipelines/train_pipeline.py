@@ -9,20 +9,56 @@ optimization, and structural profiling lifecycle for SRS channel estimation agen
 import os
 import time
 import numpy as np
+import logging
 from typing import Tuple
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def load_srs_data_from_store() -> Tuple[np.ndarray, np.ndarray]:
+
+class DataStoreCache:
+    """
+    Cache for feature store connections to avoid repeated initialization.
+    """
+    _instance = None
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+    
+    def __init__(self):
+        if self._initialized:
+            return
+        self.store_url = "mock_tensor_stream://feature-store.local"
+        self._initialized = True
+        logger.info(f"DataStoreCache initialized with {self.store_url}")
+
+
+def load_srs_data_from_store(use_cache: bool = True) -> Tuple[np.ndarray, np.ndarray]:
     """
     Simulates streaming high-fidelity IQ feature extraction from gNodeB Feature Store.
     
     In production, this would connect to the actual telemetry/feature store.
+    With caching enabled, avoids repeated connection overhead.
+    
+    Args:
+        use_cache: Whether to use cached store connection
     
     Returns:
         Tuple of (mock_srs, mock_csi) tensors
     """
     print("[1/4] Fetching raw IQ data streams from Feature Store...")
+    
+    if use_cache:
+        cache = DataStoreCache()
+        store_url = cache.store_url
+    else:
+        store_url = "mock_tensor_stream://feature-store.local"
+    
     # Generating mock tensor representation: (Samples, Channels, Subcarriers, Symbols)
+    # In production: real data loaded from store_url
     mock_srs = np.random.randn(100, 2, 72, 14).astype(np.float32)
     mock_csi = mock_srs * 1.5 + 0.1
     return mock_srs, mock_csi
@@ -42,11 +78,21 @@ def train_and_optimize_agent(x_train: np.ndarray, y_train: np.ndarray) -> str:
     print("[2/4] Triggering automated model optimization loop...")
     start_time = time.time()
     
-    # Simulating epochs
+    # Simulating epochs with batch processing
+    batch_size = 32
+    num_batches = len(x_train) // batch_size
+    
     for epoch in range(1, 4):
-        time.sleep(0.3)
-        loss = 0.05 / epoch
-        print(f"      -> Epoch {epoch}/3 - Mean Squared Error Loss: {loss:.5f}")
+        epoch_start = time.time()
+        epoch_loss = 0.0
+        
+        # Simulate batch training
+        for batch_idx in range(num_batches):
+            time.sleep(0.01)  # Simulate training step
+            epoch_loss += 0.05 / epoch / num_batches
+        
+        epoch_time = time.time() - epoch_start
+        print(f"      -> Epoch {epoch}/3 - Mean Squared Error Loss: {epoch_loss:.5f} ({epoch_time:.2f}s)")
     
     elapsed = time.time() - start_time
     print(f"      ✔ Model convergence achieved in {elapsed:.2f}s.")
@@ -93,7 +139,7 @@ if __name__ == "__main__":
     print("              STARTING AGENTIC SRS TRAINING & MLOPS PIPELINE")
     print("="*80)
     
-    x, y = load_srs_data_from_store()
+    x, y = load_srs_data_from_store(use_cache=True)
     model = train_and_optimize_agent(x, y)
     quantized_path = apply_post_training_quantization(model)
     success = register_and_deploy(quantized_path)
