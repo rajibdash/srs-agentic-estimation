@@ -1,0 +1,22 @@
+version: "1.2.0"
+system_settings:
+  max_latency_budget_us: 450
+  fallback_algorithm: "LMMSE"
+
+agent_thresholds:
+  routing_agent:
+    poor_channel_snr_threshold_db: 5.0
+    high_mobility_doppler_hz: 300.0
+  drift_agent:
+    max_allowable_bler: 0.10
+    evaluation_window_slots: 1000
+
+models:
+  denoiser:
+    framework: "TensorRT"
+    precision: "INT8"
+    path: "models/denoiser_v120.engine"
+  extrapolator:
+    framework: "ONNX"
+    precision: "FP16"
+    path: "models/extrapolator_v120.onnx"
