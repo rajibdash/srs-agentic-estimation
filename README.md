@@ -2,7 +2,7 @@
 
 ## Overview
 
-This repository implements a **multi-agent machine learning system** for real-time SRS (Sounding Reference Signal) channel estimation and downlink beamforming optimization in 5G-Advanced and 6G cellular networks. The system deploys AI models directly within the **gNodeB (Base Station)** architecture, achieving:
+This repository implements a **multi-agent machine learning system** for real-time SRS (Sounding Reference Signal) channel estimation and downlink beamforming optimization in 5G-Advanced and 6G cellular networks. The agentic framework accelerates channel inference via specialized ML agents deployed within the gNodeB Distributed Unit (DU), achieving microsecond-level latency while maintaining safety and reliability.
 
 - **30%+ Downlink Throughput Gain** under poor SNR conditions
 - **40% Pilot Overhead Reduction** under favorable channel conditions
@@ -32,6 +32,122 @@ srs-agentic-estimation/
 ```
 
 ## Architecture
+
+### SRS Signaling Flow: UE to gNodeB
+
+The SRS (Sounding Reference Signal) enables channel reciprocity measurement in uplink for downlink beamforming optimization. Below is the complete signaling sequence:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       SRS SIGNALING FLOW (Time Domain)                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+   Time →
+   
+   [Frame N]         [Frame N+M]
+   
+   UE                 gNodeB DU            RIC / CU
+   │                    │                    │
+   │  ◄─ SRS Config     │                    │
+   │◄─────────────────  │                    │
+   │  (Slot offset,     │                    │
+   │   Bandwidth,       │                    │
+   │   Periodicity)     │                    │
+   │                    │                    │
+   │  Transmit SRS      │                    │
+   ├──── SRS IQ ───────►│                    │
+   │  (OFDM symbols)    │                    │
+   │                    │                    │
+   │                    │ [Receive & Process]                
+   │                    │  ├─ Raw IQ Capture (RF Frontend)
+   │                    │  ├─ Equalization & Synchronization
+   │                    │  └─ Complex Matrix Extraction
+   │                    │                    │
+   │                    │  [Routing Agent]   │
+   │                    │  ├─ Compute SNR    │
+   │                    │  ├─ Estimate Doppler
+   │                    │  └─ Classify State │
+   │                    │                    │
+   │                    ├─ Poor Channel?     │
+   │                    │  └──► Denoiser     │
+   │                    │       (CNN)        │
+   │                    │                    │
+   │                    ├─ Good Channel?     │
+   │                    │  └──► Extrapolator │
+   │                    │       (ViT)        │
+   │                    │                    │
+   │                    │ [Channel Estimate] │
+   │                    │  ├─ Enhanced H(f,t)
+   │                    │  └─ Beamforming Vec.
+   │                    │                    │
+   │                    │  [Safety Checking] │
+   │                    │  ├─ BLER Monitor   │
+   │                    │  ├─ Drift Detection│
+   │                    │  └─ Fallback Check │
+   │                    ���                    │
+   │                    │ Report ────────────►
+   │                    │ (Channel State,     │
+   │                    │  Beamforming Hints) │
+   │                    │                    │
+   │  ◄────────────────────── Beamforming Vector (DL)
+   │ (Next Slot)        │                    │
+   │                    │                    │
+   └────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Signaling Details:**
+
+1. **SRS Configuration (Slot ≤ T₀)**
+   - Periodic or aperiodic SRS trigger from gNodeB RIC/CU
+   - UE receives: srs-ResourceSet, periodicity (1–320 slots), bandwidth, starting position
+   - UE allocates pilot resources without collision
+
+2. **SRS Transmission (UE → gNodeB, Slot T₀)**
+   - UE sends pseudo-random SRS sequence across designated OFDM symbols
+   - Typical: Last 1–4 OFDM symbols of a slot (duration: 66.67 µs to 267 µs per slot @ 30 kHz)
+   - Signal power: Configured via `alpha` (open-loop) or closed-loop power control
+
+3. **Reception & Feature Extraction (gNodeB DU, Slot T₀ + δ)**
+   - **RF Frontend:** Capture raw IQ samples at 5G sampling rate (e.g., 245.76 MS/s for 100 MHz BW)
+   - **Synchronization:** Time/frequency offset correction, cyclic prefix removal
+   - **Equalization:** OFDM demodulation → Complex channel matrix **H** (M_RX × N_RX)
+   - **Output:** IQ tensor fed to Routing Agent
+   - **Latency Budget:** ~200 µs (within slot boundary)
+
+4. **Multi-Agent Processing (gNodeB DU, Slot T₀ + δ + 200 µs)**
+   
+   **Routing Agent (FPGA/SmartNIC):**
+   - Compute SNR from received pilot power vs. noise PSD
+   - Estimate Doppler spread (normalized to Hz)
+   - **Decision:** SNR < 5 dB → Denoising Path; else → Extrapolation Path
+   - **Latency:** ≤50 µs
+   
+   **Denoising Agent (GPU/eASIC) - Poor Channel:**
+   - Input: Noisy complex matrix H_raw
+   - Architecture: Deep CNN or Denoising Autoencoder (INT8)
+   - Output: Denoised channel matrix H_clean
+   - **Latency:** ≤120 µs
+   
+   **Extrapolation Agent (SmartNIC Tensor Core) - Good Channel:**
+   - Input: Sparse high-SNR channel grid
+   - Architecture: Vision-Transformer or Super-Resolution Network (FP16)
+   - Output: Full-resolution channel matrix H_enhanced
+   - **Latency:** ≤80 µs
+
+5. **Safety & Monitoring (DU Control Plane CPU/ARM)**
+   - Measure BLER on subsequent data transmissions
+   - Track EVM (Error Vector Magnitude) drift vs. baseline
+   - If metrics degrade → trigger Drift Agent → retraining orchestration
+   - Flag fallback to classical LMMSE if ML model confidence < threshold
+   - **Telemetry Interval:** 10 ms (100 slots @ 30 kHz)
+
+6. **Beamforming Feedback (gNodeB → UE, Slot T₀ + δ + 320 µs)**
+   - Compute optimal precoding matrix **W** from H_enhanced
+   - Send feedback via PUCCH (Physical Uplink Control Channel) or CSI-RS
+   - UE applies precoding to downlink reception (implicit feedback loop)
+   - **Total Latency:** ≤450 µs (O-RAN compliant)
+
+---
 
 ### Multi-Agent System
 
